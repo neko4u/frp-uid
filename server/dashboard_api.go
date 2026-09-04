@@ -17,6 +17,7 @@ package server
 import (
 	"cmp"
 	"encoding/json"
+	"net"
 	"net/http"
 	"slices"
 
@@ -64,6 +65,29 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	subRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
 	})
+
+	//fork: uid 管理 API（绕过 Auth  仅限 127.0.0.1,本地调用）
+	uidRouter := helper.Router.NewRoute().Subrouter()
+	uidRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addr := r.RemoteAddr
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+			}
+			if host != "127.0.0.1" {
+				http.Error(w, `{"code":403,"msg":"仅允许本机访问"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uidRouter.HandleFunc("/api/uid_connections", svr.apiListUidConnections).Methods("GET")
+	uidRouter.HandleFunc("/api/uid_connection/{uid}", svr.apiGetUidConnectionByUid).Methods("GET")
+	uidRouter.HandleFunc("/api/uid_connection/{uid}/close", svr.apiCloseUidConnectionByUid).Methods("POST")
+	uidRouter.HandleFunc("/api/uid_blacklist", svr.apiGetBlacklist).Methods("GET")
+	uidRouter.HandleFunc("/api/uid_blacklist/add", svr.apiAddBlacklist).Methods("POST")
+	uidRouter.HandleFunc("/api/uid_blacklist/remove", svr.apiRemoveBlacklist).Methods("POST")
 }
 
 type serverInfoResp struct {
@@ -403,4 +427,92 @@ func (svr *Service) deleteProxies(w http.ResponseWriter, r *http.Request) {
 	}
 	cleared, total := mem.StatsCollector.ClearOfflineProxies()
 	log.Infof("cleared [%d] offline proxies, total [%d] proxies", cleared, total)
+}
+
+// fork: uid 管理 API 处理函数
+
+// GET /api/uid_connections —   所有在线 uid 连接概览
+func (svr *Service) apiListUidConnections(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	connections := svr.ctlManager.GetAllByUid()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":  0,
+		"msg":   "success",
+		"data":  connections,
+		"total": len(connections),
+	})
+}
+
+// GET /api/uid_connection/{uid} —  指定 uid 的连接详情
+func (svr *Service) apiGetUidConnectionByUid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	uid := mux.Vars(r)["uid"]
+	ctl, ok := svr.ctlManager.GetByUid(uid)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "uid 没有活跃连接"})
+		return
+	}
+	info := UidConnectionInfo{
+		Uid:           uid,
+		RunID:         ctl.runID,
+		User:          ctl.loginMsg.User,
+		ClientAddr:    ctl.conn.RemoteAddr().String(),
+		ClientVersion: ctl.loginMsg.Version,
+	}
+	ctl.mu.RLock()
+	info.ProxyCount = len(ctl.proxies)
+	ctl.mu.RUnlock()
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "success", "data": info})
+}
+
+// POST /api/uid_connection/{uid}/close?reason=xxx
+// 主动断开（发 ServerClose，不入黑名单）
+func (svr *Service) apiCloseUidConnectionByUid(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	uid := mux.Vars(r)["uid"]
+	reason := r.URL.Query().Get("reason")
+	if err := svr.ctlManager.CloseByUid(uid, reason); err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "closed"})
+}
+
+// GET /api/uid_blacklist — 列出黑名单 uid
+func (svr *Service) apiGetBlacklist(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var list []string
+	UidBlacklist.Range(func(key, _ any) bool {
+		list = append(list, key.(string))
+		return true
+	})
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "success", "data": list})
+}
+
+// POST /api/uid_blacklist/add?uid=xxx — 加入黑名单
+func (svr *Service) apiAddBlacklist(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "uid 参数不能为空"})
+		return
+	}
+	UidBlacklist.Store(uid, true)
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "added"})
+}
+
+// POST /api/uid_blacklist/remove?uid=xxx — 移除黑名单
+func (svr *Service) apiRemoveBlacklist(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1, "msg": "uid 参数不能为空"})
+		return
+	}
+	UidBlacklist.Delete(uid)
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "removed"})
 }
