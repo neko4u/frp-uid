@@ -596,7 +596,7 @@ func (svr *Service) RegisterControl(ctlConn net.Conn, loginMsg *msg.Login, inter
 		return err
 	}
 
-	// ===== fork: uid 校验 =====
+	// fork: uid 校验
 	// 1. 非空检查 — 禁止不带 uid 的连接
 	if loginMsg.Uid == "" {
 		return fmt.Errorf("客户端必须提供 uid 配置")
