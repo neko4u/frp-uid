@@ -35,6 +35,9 @@ type ClientCommonConfig struct {
 	APIMetadata
 
 	Auth AuthClientConfig `json:"auth,omitempty"`
+
+	// fork: 用户在 UserInfo 系统中的唯一标识  由 FrpClient 登录后写入 frpc.toml 顶层
+	Uid string `json:"uid,omitempty"`
 	// User specifies a prefix for proxy names to distinguish them from other
 	// clients. If this value is not "", proxy names will automatically be
 	// changed to "{user}.{proxy_name}".
