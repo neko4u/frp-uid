@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/fatedier/golib/crypto"
@@ -59,6 +60,10 @@ const (
 	connReadTimeout       time.Duration = 10 * time.Second
 	vhostReadWriteTimeout time.Duration = 30 * time.Second
 )
+
+// fork: uid 黑名单
+// 被拉黑的 uid 无法登录，dashboard API 可动态增删
+var UidBlacklist sync.Map
 
 func init() {
 	crypto.DefaultSalt = "frp"
@@ -591,8 +596,23 @@ func (svr *Service) RegisterControl(ctlConn net.Conn, loginMsg *msg.Login, inter
 		return err
 	}
 
+	// ===== fork: uid 校验 =====
+	// 1. 非空检查 — 禁止不带 uid 的连接
+	if loginMsg.Uid == "" {
+		return fmt.Errorf("客户端必须提供 uid 配置")
+	}
+	// 2. 黑名单检查 — 被拉黑则拒绝
+	if _, blacklisted := UidBlacklist.Load(loginMsg.Uid); blacklisted {
+		return fmt.Errorf("uid %s 已被拉黑", loginMsg.Uid)
+	}
+	// 3. 唯一性检查 — 该 uid 已有活跃连接则拒绝新连接
+	if _, ok := svr.ctlManager.GetByUid(loginMsg.Uid); ok {
+		return fmt.Errorf("uid %s 已有活跃连接", loginMsg.Uid)
+	}
+
 	// TODO(fatedier): use SessionContext
 	ctl, err := NewControl(ctx, svr.rc, svr.pxyManager, svr.pluginManager, authVerifier, ctlConn, !internal, loginMsg, svr.cfg)
+
 	if err != nil {
 		xl.Warnf("create new controller error: %v", err)
 		// don't return detailed errors to client
