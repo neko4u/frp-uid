@@ -46,12 +46,16 @@ type ControlManager struct {
 	// controls indexed by run id
 	ctlsByRunID map[string]*Control
 
+	// fork: 按 uid 索引连接，供 uid 管理 API 快速查找
+	ctlsByUid map[string]*Control
+
 	mu sync.RWMutex
 }
 
 func NewControlManager() *ControlManager {
 	return &ControlManager{
 		ctlsByRunID: make(map[string]*Control),
+		ctlsByUid:   make(map[string]*Control),
 	}
 }
 
@@ -65,6 +69,11 @@ func (cm *ControlManager) Add(runID string, ctl *Control) (old *Control) {
 		old.Replaced(ctl)
 	}
 	cm.ctlsByRunID[runID] = ctl
+
+	// fork: 同步建立 uid 索引
+	if ctl.uid != "" {
+		cm.ctlsByUid[ctl.uid] = ctl
+	}
 	return
 }
 
@@ -74,6 +83,11 @@ func (cm *ControlManager) Del(runID string, ctl *Control) {
 	defer cm.mu.Unlock()
 	if c, ok := cm.ctlsByRunID[runID]; ok && c == ctl {
 		delete(cm.ctlsByRunID, runID)
+
+		// fork: 同步清理 uid 索引
+		if ctl.uid != "" {
+			delete(cm.ctlsByUid, ctl.uid)
+		}
 	}
 }
 
@@ -140,6 +154,8 @@ type Control struct {
 	// replace old controller instantly.
 	runID string
 
+	uid string
+
 	mu sync.RWMutex
 
 	// Server configuration information
@@ -178,6 +194,7 @@ func NewControl(
 		poolCount:     poolCount,
 		portsUsedNum:  0,
 		runID:         loginMsg.RunID,
+		uid:           loginMsg.Uid,
 		serverCfg:     serverCfg,
 		xl:            xlog.FromContextSafe(ctx),
 		ctx:           ctx,
@@ -561,4 +578,62 @@ func (ctl *Control) CloseProxy(closeMsg *msg.CloseProxy) (err error) {
 		_ = ctl.pluginManager.CloseProxy(notifyContent)
 	}()
 	return
+}
+
+// UidConnectionInfo 表示一个 uid 连接的概要信息
+type UidConnectionInfo struct {
+	Uid           string `json:"uid"`
+	RunID         string `json:"run_id"`
+	User          string `json:"user"`
+	ClientAddr    string `json:"client_addr"`
+	ProxyCount    int    `json:"proxy_count"`
+	ClientVersion string `json:"client_version"`
+}
+
+// GetByUid 通过 uid 查询控制对象
+func (cm *ControlManager) GetByUid(uid string) (ctl *Control, ok bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	ctl, ok = cm.ctlsByUid[uid]
+	return
+}
+
+// GetAllByUid 返回所有已注册 uid 的连接概览
+func (cm *ControlManager) GetAllByUid() []UidConnectionInfo {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	result := make([]UidConnectionInfo, 0, len(cm.ctlsByUid))
+	for uid, ctl := range cm.ctlsByUid {
+		info := UidConnectionInfo{
+			Uid:           uid,
+			RunID:         ctl.runID,
+			User:          ctl.loginMsg.User,
+			ClientAddr:    ctl.conn.RemoteAddr().String(),
+			ClientVersion: ctl.loginMsg.Version,
+		}
+		ctl.mu.RLock()
+		info.ProxyCount = len(ctl.proxies)
+		ctl.mu.RUnlock()
+		result = append(result, info)
+	}
+	return result
+}
+
+// CloseByUid 断开指定 uid 的连接：先发 ServerClose 再关 TCP
+func (cm *ControlManager) CloseByUid(uid string, reason string) error {
+	cm.mu.RLock()
+	ctl, ok := cm.ctlsByUid[uid]
+	cm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("uid %s 没有活跃连接", uid)
+	}
+
+	if reason != "" {
+		_ = ctl.msgDispatcher.Send(&msg.ServerClose{Reason: reason})
+	} else {
+		_ = ctl.msgDispatcher.Send(&msg.ServerClose{})
+	}
+	ctl.Close()
+	return nil
 }
