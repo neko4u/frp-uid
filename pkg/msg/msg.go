@@ -38,6 +38,7 @@ const (
 	TypeNatHoleResp        = 'm'
 	TypeNatHoleSid         = '5'
 	TypeNatHoleReport      = '6'
+	TypeServerClose        = 'S'
 )
 
 var msgTypeMap = map[byte]any{
@@ -59,6 +60,7 @@ var msgTypeMap = map[byte]any{
 	TypeNatHoleResp:        NatHoleResp{},
 	TypeNatHoleSid:         NatHoleSid{},
 	TypeNatHoleReport:      NatHoleReport{},
+	TypeServerClose:        ServerClose{},
 }
 
 var TypeNameNatHoleResp = reflect.TypeOf(&NatHoleResp{}).Elem().Name()
@@ -79,6 +81,7 @@ type Login struct {
 	Os           string            `json:"os,omitempty"`
 	Arch         string            `json:"arch,omitempty"`
 	User         string            `json:"user,omitempty"`
+	Uid          string            `json:"uid,omitempty"`
 	PrivilegeKey string            `json:"privilege_key,omitempty"`
 	Timestamp    int64             `json:"timestamp,omitempty"`
 	RunID        string            `json:"run_id,omitempty"`
@@ -89,6 +92,10 @@ type Login struct {
 
 	// Some global configures.
 	PoolCount int `json:"pool_count,omitempty"`
+}
+
+type ServerClose struct {
+	Reason string `json:"reason,omitempty"` // 断开原因，如 "管理员踢出" / "时长耗尽" / "uid被拉黑"
 }
 
 type LoginResp struct {
