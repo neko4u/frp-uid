@@ -111,6 +111,9 @@ type Service struct {
 	// Sets authentication based on selected method
 	authSetter auth.Setter
 
+	// fork: 收到服务端 ServerClose 时关闭此通道，触发主循环优雅退出（不重连）
+	serverCloseChan chan struct{}
+
 	// web server for admin UI and apis
 	webServer *httppkg.Server
 
@@ -158,6 +161,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	s := &Service{
 		ctx:              context.Background(),
 		authSetter:       authSetter,
+		serverCloseChan:  make(chan struct{}),
 		webServer:        webServer,
 		common:           options.Common,
 		configFilePath:   options.ConfigFilePath,
@@ -224,12 +228,28 @@ func (svr *Service) Run(ctx context.Context) error {
 }
 
 func (svr *Service) keepControllerWorking() {
-	<-svr.ctl.Done()
+	select {
+	case <-svr.ctx.Done():
+		return
+	case <-svr.serverCloseChan:
+		log.Warnf("收到服务端断开指令，将优雅退出（不重连）")
+		svr.gracefulShutdownDuration = 0
+		svr.cancel(nil)
+		return
+	case <-svr.ctl.Done():
+		// fork: 竞态防护——若连接断开的同时收到 ServerClose(消息先于 TCP 关闭到达)，二次确认后同样不重连
+		select {
+		case <-svr.serverCloseChan:
+			log.Warnf("收到服务端断开指令，将优雅退出（不重连）")
+			svr.gracefulShutdownDuration = 0
+			svr.cancel(nil)
+			return
+		default:
+		}
+		log.Infof("控制连接已关闭，开始重连...")
+	}
 
-	// There is a situation where the login is successful but due to certain reasons,
-	// the control immediately exits. It is necessary to limit the frequency of reconnection in this case.
-	// The interval for the first three retries in 1 minute will be very short, and then it will increase exponentially.
-	// The maximum interval is 20 seconds.
+	// ===== 以下为原重连逻辑，原样保留
 	wait.BackoffUntil(func() (bool, error) {
 		// loopLoginUntilSuccess is another layer of loop that will continuously attempt to
 		// login to the server until successful.
@@ -284,6 +304,7 @@ func (svr *Service) login() (conn net.Conn, connector Connector, err error) {
 		Timestamp: time.Now().Unix(),
 		RunID:     svr.runID,
 		Metas:     svr.common.Metadatas,
+		Uid:       svr.common.Uid,
 	}
 	if svr.clientSpec != nil {
 		loginMsg.ClientSpec = *svr.clientSpec
@@ -348,7 +369,7 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 			Connector:      connector,
 			VnetController: svr.vnetController,
 		}
-		ctl, err := NewControl(svr.ctx, sessionCtx)
+		ctl, err := NewControl(svr.ctx, sessionCtx, svr.serverCloseChan)
 		if err != nil {
 			conn.Close()
 			xl.Errorf("new control error: %v", err)
@@ -412,6 +433,13 @@ func (svr *Service) stop() {
 	if svr.webServer != nil {
 		svr.webServer.Close()
 		svr.webServer = nil
+	}
+
+	// fork: 幂等关闭 ServerClose 通道
+	select {
+	case <-svr.serverCloseChan:
+	default:
+		close(svr.serverCloseChan)
 	}
 }
 

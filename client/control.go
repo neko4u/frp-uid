@@ -67,6 +67,9 @@ type Control struct {
 
 	doneCh chan struct{}
 
+	// fork: 外部传入的 ServerClose 信号通道，收到服务端踢人时关闭
+	serverCloseChan chan struct{}
+
 	// of time.Time, last time got the Pong message
 	lastPong atomic.Value
 
@@ -80,14 +83,16 @@ type Control struct {
 	msgDispatcher *msg.Dispatcher
 }
 
-func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, error) {
+func NewControl(ctx context.Context, sessionCtx *SessionContext, serverCloseChan chan struct{}) (*Control, error) {
 	// new xlog instance
 	ctl := &Control{
-		ctx:        ctx,
-		xl:         xlog.FromContextSafe(ctx),
-		sessionCtx: sessionCtx,
-		doneCh:     make(chan struct{}),
+		ctx:             ctx,
+		xl:              xlog.FromContextSafe(ctx),
+		sessionCtx:      sessionCtx,
+		doneCh:          make(chan struct{}),
+		serverCloseChan: serverCloseChan,
 	}
+
 	ctl.lastPong.Store(time.Now())
 
 	if sessionCtx.ConnEncrypted {
@@ -203,6 +208,22 @@ func (ctl *Control) closeSession() {
 	ctl.sessionCtx.Connector.Close()
 }
 
+// fork: 收到服务端断开指令，关闭 serverCloseChan 触发主循环优雅退出
+func (ctl *Control) handleServerClose(m msg.Message) {
+	inMsg := m.(*msg.ServerClose)
+	reason := "服务端主动断开"
+	if inMsg.Reason != "" {
+		reason = inMsg.Reason
+	}
+	ctl.xl.Warnf("收到服务端断开指令: %s", reason)
+
+	select {
+	case <-ctl.serverCloseChan:
+	default:
+		close(ctl.serverCloseChan)
+	}
+}
+
 func (ctl *Control) Close() error {
 	return ctl.GracefulClose(0)
 }
@@ -232,6 +253,9 @@ func (ctl *Control) registerMsgHandlers() {
 	ctl.msgDispatcher.RegisterHandler(&msg.NewProxyResp{}, ctl.handleNewProxyResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleResp{}, ctl.handleNatHoleResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.Pong{}, ctl.handlePong)
+
+	// fork: 注册 ServerClose 处理器（服务端主动断开链接）
+	ctl.msgDispatcher.RegisterHandler(&msg.ServerClose{}, ctl.handleServerClose)
 }
 
 // heartbeatWorker sends heartbeat to server and check heartbeat timeout.
