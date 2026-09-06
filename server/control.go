@@ -634,6 +634,8 @@ func (cm *ControlManager) CloseByUid(uid string, reason string) error {
 	} else {
 		_ = ctl.msgDispatcher.Send(&msg.ServerClose{})
 	}
+	// 给 sendLoop 一点时间把 ServerClose 真正写入连接，否则 TCP 立即关闭会导致 frpc 收不到消息
+	time.Sleep(300 * time.Millisecond)
 	ctl.Close()
 	return nil
 }
