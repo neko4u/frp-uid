@@ -41,6 +41,9 @@ var (
 	cfgDir           string
 	showVersion      bool
 	strictConfigMode bool
+
+	// fork: 命令行传入的 uid（优先于配置文件，避免明文落盘）
+	uidFlag string
 )
 
 func init() {
@@ -48,6 +51,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgDir, "config_dir", "", "", "config directory, run one frpc service for each file in config directory")
 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "version of frpc")
 	rootCmd.PersistentFlags().BoolVarP(&strictConfigMode, "strict_config", "", true, "strict config parsing mode, unknown fields will cause an errors")
+	rootCmd.PersistentFlags().StringVarP(&uidFlag, "uid", "", "", "user uid for frps authentication")
 }
 
 var rootCmd = &cobra.Command{
@@ -116,7 +120,17 @@ func runClient(cfgFilePath string) error {
 	if err != nil {
 		return err
 	}
+
+	// fork: 命令行 uid 覆盖配置文件
+	if uidFlag != "" {
+		cfg.Uid = uidFlag
+		if cfg.Metadatas == nil {
+			cfg.Metadatas = make(map[string]string)
+		}
+		cfg.Metadatas["uid"] = uidFlag
+	}
 	if isLegacyFormat {
+
 		fmt.Printf("WARNING: ini format is deprecated and the support will be removed in the future, " +
 			"please use yaml/json/toml format instead!\n")
 	}
