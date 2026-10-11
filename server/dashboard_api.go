@@ -66,28 +66,68 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
 	})
 
-	//fork: uid 管理 API（绕过 Auth  仅限 127.0.0.1,本地调用）
+	//fork: uid 管理 API（绕过 Auth，按来源 IP 白名单限制；未配置时仅本机）
 	uidRouter := helper.Router.NewRoute().Subrouter()
 	uidRouter.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			addr := r.RemoteAddr
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr
-			}
-			if host != "127.0.0.1" {
-				http.Error(w, `{"code":403,"msg":"仅允许本机访问"}`, http.StatusForbidden)
+			if !svr.uidIPAllowed(r) {
+				log.Warnf("uid api rejected: remote=%s path=%s not in uidAPIAllowIPs",
+					r.RemoteAddr, r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":403,"msg":"来源 IP 不在 uid 管理 API 白名单内"}`))
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	})
+
 	uidRouter.HandleFunc("/api/uid_connections", svr.apiListUidConnections).Methods("GET")
 	uidRouter.HandleFunc("/api/uid_connection/{uid}", svr.apiGetUidConnectionByUid).Methods("GET")
 	uidRouter.HandleFunc("/api/uid_connection/{uid}/close", svr.apiCloseUidConnectionByUid).Methods("POST")
 	uidRouter.HandleFunc("/api/uid_blacklist", svr.apiGetBlacklist).Methods("GET")
 	uidRouter.HandleFunc("/api/uid_blacklist/add", svr.apiAddBlacklist).Methods("POST")
 	uidRouter.HandleFunc("/api/uid_blacklist/remove", svr.apiRemoveBlacklist).Methods("POST")
+}
+
+// fork: uid 管理 API 的来源 IP 校验。
+// 白名单取自 frps.toml 的 uidAPIAllowIPs（支持单个 IP 与 CIDR），
+func (svr *Service) uidIPAllowed(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	// IPv4 映射的 IPv6（::ffff:1.2.3.4）归一化成 IPv4 再比较
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+
+	for _, item := range svr.cfg.UIDAPIAllowIPs {
+		if item == "" {
+			continue
+		}
+		if _, cidr, err := net.ParseCIDR(item); err == nil {
+			if cidr.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		target := net.ParseIP(item)
+		if target == nil {
+			continue
+		}
+		if v4 := target.To4(); v4 != nil {
+			target = v4
+		}
+		if target.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 type serverInfoResp struct {

@@ -17,6 +17,7 @@ package v1
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/samber/lo"
 
@@ -99,6 +100,8 @@ type ServerConfig struct {
 	AllowPorts []types.PortsRange `json:"allowPorts,omitempty"`
 
 	HTTPPlugins []HTTPPluginOptions `json:"httpPlugins,omitempty"`
+
+	UIDAPIAllowIPs []string `json:"uidAPIAllowIPs,omitempty"`
 }
 
 func (c *ServerConfig) Complete() error {
@@ -125,6 +128,19 @@ func (c *ServerConfig) Complete() error {
 	c.UserConnTimeout = util.EmptyOr(c.UserConnTimeout, 10)
 	c.UDPPacketSize = util.EmptyOr(c.UDPPacketSize, 1500)
 	c.NatHoleAnalysisDataReserveHours = util.EmptyOr(c.NatHoleAnalysisDataReserveHours, 7*24)
+
+	if len(c.UIDAPIAllowIPs) == 0 {
+		c.UIDAPIAllowIPs = []string{"127.0.0.1", "::1"}
+	}
+	for _, item := range c.UIDAPIAllowIPs {
+		if _, _, err := net.ParseCIDR(item); err == nil {
+			continue
+		}
+		if net.ParseIP(item) == nil {
+			return fmt.Errorf("uidAPIAllowIPs 含非法条目 %q，应为 IP 或 CIDR", item)
+		}
+	}
+
 	return nil
 }
 
